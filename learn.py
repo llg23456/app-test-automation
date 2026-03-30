@@ -36,8 +36,6 @@ if __name__ == "__main__":
     # 再次等待
     time.sleep(2)
     
-
-    
     # 关键：如果传入了 testcase，使用步骤执行模式
     if testcase_path:
         print_with_color(f"加载测试用例: {testcase_path}", "yellow")

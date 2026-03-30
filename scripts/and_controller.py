@@ -96,27 +96,34 @@ class AndroidController:
         self.backslash = "\\"
     
     def start_app(self):
-        """启动 APP，使用配置文件中的 Activity"""
-        package = configs.get("app", {}).get("package_name", "com.santiaotalk.im")
-        activity = configs.get("app", {}).get("activity", ".MainActivity")
-        device = configs.get("app", {}).get("device", self.device)
-        
-        print(f"启动应用: {package}/{activity}")
-        
-        # 先关闭再启动（确保冷启动）
-        os.system(f"adb -s {device} shell am force-stop {package}")
+        """启动 APP（固定包名，通用启动）"""
+        package = "com.santiaotalk.im"
+        device = self.device
+        print(f"启动应用: {package}")
+
+        # =========================
+        # 1. 强制停止（冷启动）
+        subprocess.run(
+            ["adb", "-s", device, "shell", "am", "force-stop", package],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
         time.sleep(1)
-        
-        # 启动 APP
-        cmd = f"adb -s {device} shell am start -n {package}/{activity}"
-        result = os.system(cmd)
-        
-        if result != 0:
-            print(f"启动失败，尝试备用 Activity: .SplashActivity")
-            os.system(f"adb -s {device} shell am start -n {package}/.SplashActivity")
-        
+
+        # =========================
+        # 2. monkey 启动
+        result = subprocess.run(
+            ["adb", "-s", device, "shell", "monkey",
+             "-p", package,
+             "-c", "android.intent.category.LAUNCHER",
+             "1"],
+            capture_output=True,
+            text=True
+        )
+    
         print("等待应用启动...")
-        time.sleep(5)  # 等待 5 秒确保加载完成
+        time.sleep(5)
+
 
     def get_device_size(self):
         adb_command = f"adb -s {self.device} shell wm size"
