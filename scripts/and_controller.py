@@ -5,6 +5,7 @@ import time
 
 from .config import load_config
 from .utils import print_with_color
+import uiautomator2 as u2
 
 
 configs = load_config()
@@ -94,35 +95,19 @@ class AndroidController:
         self.xml_dir = configs["ANDROID_XML_DIR"]
         self.width, self.height = self.get_device_size()
         self.backslash = "\\"
+        self.u2 = u2.connect(self.device)
     
     def start_app(self):
-        """启动 APP（固定包名，通用启动）"""
         package = "com.santiaotalk.im"
-        device = self.device
-        print(f"启动应用: {package}")
 
-        # =========================
-        # 1. 强制停止（冷启动）
-        subprocess.run(
-            ["adb", "-s", device, "shell", "am", "force-stop", package],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        time.sleep(1)
+        stop_cmd = f"adb -s {self.device} shell am force-stop {package}"
+        execute_adb(stop_cmd)
 
-        # =========================
-        # 2. monkey 启动
-        result = subprocess.run(
-            ["adb", "-s", device, "shell", "monkey",
-             "-p", package,
-             "-c", "android.intent.category.LAUNCHER",
-             "1"],
-            capture_output=True,
-            text=True
-        )
-    
-        print("等待应用启动...")
-        time.sleep(5)
+        time.sleep(2)
+        
+        adb_command = f'adb -s {self.device} shell monkey -p {package} -c android.intent.category.LAUNCHER 1'
+        ret = execute_adb(adb_command)
+        return ret
 
 
     def get_device_size(self):
@@ -133,32 +118,71 @@ class AndroidController:
         return 0, 0
 
     def get_screenshot(self, prefix, save_dir):
-        cap_command = f"adb -s {self.device} shell screencap -p " \
-                      f"{os.path.join(self.screenshot_dir, prefix + '.png').replace(self.backslash, '/')}"
-        pull_command = f"adb -s {self.device} pull " \
-                       f"{os.path.join(self.screenshot_dir, prefix + '.png').replace(self.backslash, '/')} " \
-                       f"{os.path.join(save_dir, prefix + '.png')}"
+        remote_path = os.path.join(self.screenshot_dir, prefix + '.png').replace(self.backslash, '/')
+        local_path = os.path.join(save_dir, prefix + '.png')
+
+        cap_command = f"adb -s {self.device} shell screencap -p {remote_path}"
+        pull_command = f"adb -s {self.device} pull {remote_path} {local_path}"
+        rm_command = f"adb -s {self.device} shell rm {remote_path}"
+
+        # 1. 截图
         result = execute_adb(cap_command)
-        if result != "ERROR":
-            result = execute_adb(pull_command)
-            if result != "ERROR":
-                return os.path.join(save_dir, prefix + ".png")
-            return result
-        return result
+        if result == "ERROR":
+            return "ERROR"
+            
+        # 2. 拉到本地
+        result = execute_adb(pull_command)
+        if result == "ERROR":
+            return "ERROR"
+            
+        # 3. 删除远端文件（不管成不成功都无所谓）
+        execute_adb(rm_command)
+
+        return local_path
 
     def get_xml(self, prefix, save_dir):
-        dump_command = f"adb -s {self.device} shell uiautomator dump " \
-                       f"{os.path.join(self.xml_dir, prefix + '.xml').replace(self.backslash, '/')}"
-        pull_command = f"adb -s {self.device} pull " \
-                       f"{os.path.join(self.xml_dir, prefix + '.xml').replace(self.backslash, '/')} " \
-                       f"{os.path.join(save_dir, prefix + '.xml')}"
-        result = execute_adb(dump_command)
-        if result != "ERROR":
-            result = execute_adb(pull_command)
-            if result != "ERROR":
-                return os.path.join(save_dir, prefix + ".xml")
-            return result
-        return result
+        local_xml_path = os.path.join(save_dir, prefix + ".xml")
+        
+        try:
+            xml = self.u2.dump_hierarchy(compressed=False, pretty=True)
+            
+            if not xml or "<hierarchy" not in xml:
+                print_with_color("uiautomator2 dump returned empty xml", "red")
+                return "ERROR"
+        
+        except Exception as e:
+            print_with_color(f"uiautomator2 dump failed: {e}", "red")
+            # 尝试重连一次（不是循环）
+            try:
+                self.u2 = u2.connect(self.device)
+                xml = self.u2.dump_hierarchy(compressed=False, pretty=True)
+                if not xml or "<hierarchy" not in xml:
+                    return "ERROR"
+                    
+            except Exception as e2:
+                print_with_color(f"uiautomator2 reconnect failed: {e2}", "red")
+                return "ERROR"
+
+        # 写入文件
+        try:
+            with open(local_xml_path, "w", encoding="utf-8") as f:
+                f.write(xml)
+                return local_xml_path
+        except Exception as e:
+            print_with_color(f"write xml failed: {e}", "red")
+            return "ERROR"
+        # dump_command = f"adb -s {self.device} shell uiautomator dump " \
+        #                f"{os.path.join(self.xml_dir, prefix + '.xml').replace(self.backslash, '/')}"
+        # pull_command = f"adb -s {self.device} pull " \
+        #                f"{os.path.join(self.xml_dir, prefix + '.xml').replace(self.backslash, '/')} " \
+        #                f"{os.path.join(save_dir, prefix + '.xml')}"
+        # result = execute_adb(dump_command)
+        # if result != "ERROR":
+        #     result = execute_adb(pull_command)
+        #     if result != "ERROR":
+        #         return os.path.join(save_dir, prefix + ".xml")
+        #     return result
+        # return result
 
     def back(self):
         adb_command = f"adb -s {self.device} shell input keyevent KEYCODE_BACK"
