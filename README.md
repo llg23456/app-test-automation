@@ -38,7 +38,17 @@ pip install -r requirements.txt
 
 智能体需要能同时理解**文本 + 屏幕图像**的多模态模型。实验中我们曾使用 `gpt-4-vision-preview` 作为决策模型。
 
-请在项目根目录编辑 `config.yaml`。使用前至少需要配置：
+从 GitHub **克隆**本仓库后，请先复制模板再填写密钥（真实 `config.yaml` 已列入 `.gitignore`，不会被提交）：
+
+```bash
+# Windows（PowerShell / CMD）
+copy config.example.yaml config.yaml
+
+# Linux / macOS
+cp config.example.yaml config.yaml
+```
+
+然后在项目根目录编辑 `config.yaml`。使用前至少需要配置：
 
 1. **OpenAI API Key**：从 OpenAI 获取可用密钥，才能调用 GPT-4V 等视觉模型。  
 2. **请求间隔（REQUEST_INTERVAL）**：两次调用之间的秒数，用于控制频率，请按账号额度自行调整。
@@ -92,3 +102,9 @@ python3 scripts/dfs_explore.py --app com.example.app --root_dir ./
 ```
 
 可选：`--max_steps 20`。公共逻辑在 `scripts/exploration_common.py`。运行结束后可在对应 demo 目录查看 `report_bfs.md` / `report_dfs.md` 以及 `log_bfs.jsonl` / `log_dfs.jsonl`。
+
+## Git 与隐私
+
+- 根目录 **`config.yaml`**、**`apps/**/demos/`**（截屏与日志）、**`apps/**/auto_docs/`** 等已写入 **`.gitignore`**，避免 API 密钥与界面截图随仓库泄露。
+- 仓库内提供 **`config.example.yaml`** 作为无密钥模板，供他人克隆后复制为 `config.yaml` 使用。
+- 若你**曾经把含密钥的 `config.yaml` 提交过 Git**，请先在平台**作废/轮换**相关 API Key，再执行 `git rm --cached config.yaml` 并重新提交，必要时清理 Git 历史中的敏感文件。

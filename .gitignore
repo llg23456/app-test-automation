@@ -1,0 +1,61 @@
+# ========== 隐私与密钥（切勿提交）==========
+config.yaml
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*_secret*
+*_private*
+
+# ========== Python ==========
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+env/
+ENV/
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+coverage.xml
+htmlcov/
+
+# ========== 运行产物（含截屏、聊天记录界面，可能含隐私）==========
+apps/**/demos/
+apps/**/auto_docs/
+
+# ========== 可选：仅本地使用的用例覆盖（若你有）==========
+testcase.local.json
+
+# ========== IDE / 编辑器 ==========
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ========== 系统杂项 ==========
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ========== 日志与临时文件 ==========
+*.log
+*.tmp
+*.temp
+.cache/
+
+# ========== Jupyter ==========
+.ipynb_checkpoints/
+
+# ========== Cursor / 本地工作区（可选，含路径信息时建议忽略）==========
+.cursor/
