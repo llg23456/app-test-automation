@@ -138,8 +138,10 @@ class SelfExplorer:
         for attempt in range(max_retry):
             try:
                 # 1. 获取截图和控件树（复用原有逻辑）
+                time.sleep(2.0)
                 step_num = self.current_step_index + 1
                 screenshot_before = self.controller.get_screenshot(f"step_{step_num}_before", self.task_dir)
+                time.sleep(1.0)
                 xml_path = self.controller.get_xml(f"step_{step_num}", self.task_dir)
                 
                 if screenshot_before == "ERROR" or xml_path == "ERROR":
@@ -432,7 +434,9 @@ class SelfExplorer:
         while round_count < self.configs["MAX_ROUNDS"]:
             round_count += 1
             print_with_color(f"Round {round_count}", "yellow")
+            time.sleep(2.0)
             screenshot_before = self.controller.get_screenshot(f"{round_count}_before", self.task_dir)
+            time.sleep(1.0)
             xml_path = self.controller.get_xml(f"{round_count}", self.task_dir)
             if screenshot_before == "ERROR" or xml_path == "ERROR":
                 break

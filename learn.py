@@ -34,7 +34,7 @@ if __name__ == "__main__":
     explorer.controller.start_app()
     
     # 再次等待
-    time.sleep(2)
+    time.sleep(3)
     
     # 关键：如果传入了 testcase，使用步骤执行模式
     if testcase_path:

@@ -42,10 +42,10 @@ pip install -r requirements.txt
 
 ```bash
 # Windows（PowerShell / CMD）
-copy config.example.yaml config.yaml
+copy config.yaml config.yaml
 
 # Linux / macOS
-cp config.example.yaml config.yaml
+cp config.yaml config.yaml
 ```
 
 然后在项目根目录编辑 `config.yaml`。使用前至少需要配置：
