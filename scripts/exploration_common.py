@@ -11,6 +11,7 @@ import re
 import sys
 import time
 import datetime
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import List, Optional, Set, Tuple
 
@@ -24,6 +25,59 @@ from .utils import print_with_color, draw_bbox_multi
 def _sanitize_uid_for_file(uid: str, max_len: int = 80) -> str:
     s = re.sub(r"[^\w\-.]", "_", uid)
     return s[:max_len] if len(s) > max_len else s
+
+
+# 「+」菜单展开时仍可 back 关闭；检测到这些文案则认为不是「干净主 Tab」，应允许继续 back
+_PLUS_MENU_MARKERS = ("发起群聊", "添加朋友", "扫一扫")
+# 全屏搜索等子流程，应优先 back / 点取消，不按主 Tab 跳过逻辑处理
+_FULLSCREEN_SEARCH_MARKERS = ("请输入用户昵称", "请输入用户昵称或群名称", "群名称")
+# 底部主导航四个 Tab（名称需在界面文案中出现）
+_MAIN_TAB_LABELS = ("消息", "通话", "好友", "我的")
+
+
+def _bounds_mid_y(bounds_str: str) -> Optional[int]:
+    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds_str)
+    if not m:
+        return None
+    y1, y2 = int(m.group(2)), int(m.group(4))
+    return (y1 + y2) // 2
+
+
+def is_clean_main_tab_home(xml_path: str, screen_height: int) -> bool:
+    """
+    判断是否为底部四个 Tab 可见、且无「+」弹出菜单、非全屏搜索页的「主界面」状态。
+    此时再按系统返回容易退出应用，应改为重放路径而非 KEYCODE_BACK。
+    """
+    if screen_height <= 0:
+        screen_height = 1920
+    bottom_zone = int(screen_height * 0.58)
+    try:
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+    except Exception:
+        return False
+    tabs_in_nav = set()
+    for elem in root.iter():
+        att = elem.attrib
+        text = (att.get("text") or "") + (att.get("content-desc") or "")
+        if not text.strip():
+            continue
+        for m in _PLUS_MENU_MARKERS:
+            if m in text:
+                return False
+        for m in _FULLSCREEN_SEARCH_MARKERS:
+            if m in text:
+                return False
+        b = att.get("bounds")
+        if not b:
+            continue
+        mid_y = _bounds_mid_y(b)
+        if mid_y is None or mid_y < bottom_zone:
+            continue
+        for tab in _MAIN_TAB_LABELS:
+            if tab in text:
+                tabs_in_nav.add(tab)
+    return len(tabs_in_nav) >= 3
 
 
 def build_elem_list(xml_path: str, useless_list: Set[str], configs: dict) -> List[AndroidElement]:
@@ -211,41 +265,131 @@ class ExplorationContext:
         ok = self.execute_parsed_action(res, elem_list)
         return ok
 
+    def try_path_replay_instead_of_back(
+        self,
+        xml_path: str,
+        cur_fp: str,
+        target_fp: str,
+        parent_path: List[int],
+    ) -> Optional[bool]:
+        """
+        若当前已在底部 Tab 主界面干净态：不再按 KEYCODE_BACK（避免误退桌面），也不做冷启动杀进程；
+        若需要回到父屏指纹，仅在本应用内按 parent_path 重放点击（cold_start=False）。
+        返回 True=已到目标指纹；False=重放失败或仍未匹配；None=不适用（非主 Tab 干净态）。
+        """
+        h = int(self.controller.height or 0)
+        if h <= 0:
+            h = 1920
+        if not is_clean_main_tab_home(xml_path, h):
+            return None
+        print_with_color(
+            "主 Tab 干净界面：跳过系统返回与冷启动，仅在应用内重放父路径点击（不杀进程）…",
+            "yellow",
+        )
+        self.append_jsonl(
+            {
+                "type": "skip_back_main_tab_home",
+                "cur_fp": cur_fp[:24],
+                "target_fp": target_fp[:24],
+            }
+        )
+        fp_r, _, shot = self.navigate_to_path(parent_path, cold_start=False)
+        if shot == "ERROR":
+            return False
+        return fp_r == target_fp
+
+    def maybe_recover_outside_app(self, parent_path: List[int], target_fp: str) -> Optional[bool]:
+        """
+        若前台已不是目标应用（例如连按返回到了模拟器桌面），则冷启动并导航回 parent_path。
+        返回 None=仍在目标应用内无需处理；True=已恢复且指纹匹配；False=已恢复但指纹仍不符或失败。
+        """
+        pkg = self.controller.get_foreground_package()
+        if not pkg or pkg == self.app:
+            return None
+        print_with_color(
+            f"检测到前台包为 {pkg}（目标 {self.app}），已退出应用，冷启动并回父路径…",
+            "yellow",
+        )
+        self.append_jsonl({"type": "recover_outside_app", "foreground": pkg, "target": self.app})
+        self.controller.start_app()
+        time.sleep(2)
+        fp_r, _, shot = self.navigate_to_path(parent_path, cold_start=False)
+        if shot == "ERROR":
+            return False
+        return fp_r == target_fp
+
     def navigate_back_to_fingerprint(self, target_fp: str, parent_path: List[int]) -> bool:
-        """先 KEYCODE_BACK；界面未回到目标则模型介入；仍失败则冷启动并重放 parent_path。"""
+        """先 KEYCODE_BACK；主 Tab 干净界面则跳过后退改为重放路径；界面未回到目标则模型介入；退出应用则冷启动重放。"""
         for attempt in range(8):
-            shot, _, cur_fp, elems = self.capture_screen(f"back_nav_{attempt}")
+            shot, xml_path, cur_fp, elems = self.capture_screen(f"back_nav_{attempt}")
             if shot == "ERROR":
                 return False
             if cur_fp == target_fp:
+                return True
+
+            tr = self.try_path_replay_instead_of_back(xml_path, cur_fp, target_fp, parent_path)
+            if tr is True:
+                return True
+            if tr is False:
+                return False
+
+            rec = self.maybe_recover_outside_app(parent_path, target_fp)
+            if rec is True:
                 return True
 
             fp_before = cur_fp
             self.back_key_once()
             self.sleep_interval()
 
-            shot2, _, fp_after, elems2 = self.capture_screen(f"back_after_key_{attempt}")
+            rec2 = self.maybe_recover_outside_app(parent_path, target_fp)
+            if rec2 is True:
+                return True
+
+            shot2, xml_path2, fp_after, elems2 = self.capture_screen(f"back_after_key_{attempt}")
             if shot2 == "ERROR":
                 return False
             if fp_after == target_fp:
+                return True
+
+            tr2 = self.try_path_replay_instead_of_back(xml_path2, fp_after, target_fp, parent_path)
+            if tr2 is True:
+                return True
+            if tr2 is False:
+                return False
+
+            rec3 = self.maybe_recover_outside_app(parent_path, target_fp)
+            if rec3 is True:
                 return True
 
             if fp_after == fp_before and elems2:
                 labeled = os.path.join(self.task_dir, f"back_labeled_{self.exploration_steps}_{attempt}.png")
                 draw_bbox_multi(shot2, labeled, elems2, dark_mode=self.configs.get("DARK_MODE", False))
                 if self.llm_navigate_back(labeled, elems2):
-                    _, _, fp3, _ = self.capture_screen(f"back_after_llm_{attempt}")
+                    shot3, xml_path3, fp3, _ = self.capture_screen(f"back_after_llm_{attempt}")
                     if fp3 == target_fp:
                         return True
+                    tr3 = self.try_path_replay_instead_of_back(xml_path3, fp3, target_fp, parent_path)
+                    if tr3 is True:
+                        return True
+                    if tr3 is False:
+                        return False
+                    rec4 = self.maybe_recover_outside_app(parent_path, target_fp)
+                    if rec4 is True:
+                        return True
 
-        print_with_color("返回失败，冷启动并重放路径...", "yellow")
+        print_with_color("返回失败，先尝试不重载进程重放父路径…", "yellow")
+        fp_r, _, shot = self.navigate_to_path(parent_path, cold_start=False)
+        if shot != "ERROR" and fp_r == target_fp:
+            return True
+        print_with_color("仍无法对齐父屏，最后手段：冷启动并重放路径…", "yellow")
         fp_r, _, shot = self.navigate_to_path(parent_path)
         return shot != "ERROR" and fp_r == target_fp
 
-    def navigate_to_path(self, path: List[int]) -> Tuple[str, List[AndroidElement], str]:
+    def navigate_to_path(self, path: List[int], cold_start: bool = True) -> Tuple[str, List[AndroidElement], str]:
         """冷启动应用并按 path 依次点击编号（不计探索步数）；返回 (fingerprint, elem_list, screenshot_path)。"""
-        self.controller.start_app()
-        time.sleep(2)
+        if cold_start:
+            self.controller.start_app()
+            time.sleep(2)
         for depth, idx in enumerate(path):
             prefix = f"nav_{depth}_i{idx}"
             shot, _, _, elems = self.capture_screen(prefix)

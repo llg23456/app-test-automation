@@ -97,8 +97,10 @@ def run_bfs(ctx: ExplorationContext) -> None:
 
             ok_back = ctx.navigate_back_to_fingerprint(fp, path)
             if not ok_back:
-                print_with_color("返回父屏失败，尝试重新导航到当前 path", "yellow")
-                ctx.navigate_to_path(path)
+                print_with_color("返回父屏失败：先不杀进程重放 path，再不行再冷启动…", "yellow")
+                fp_s, _, shot_s = ctx.navigate_to_path(path, cold_start=False)
+                if shot_s == "ERROR":
+                    ctx.navigate_to_path(path)
 
     ctx.write_report_md()
 

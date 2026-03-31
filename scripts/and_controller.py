@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import xml.etree.ElementTree as ET
 import time
@@ -92,36 +93,96 @@ class AndroidController:
         self.device = device
         self.screenshot_dir = configs["ANDROID_SCREENSHOT_DIR"]
         self.xml_dir = configs["ANDROID_XML_DIR"]
+        self.package_name = configs.get("app", {}).get("package_name", "com.santiaotalk.im")
         self.width, self.height = self.get_device_size()
         self.backslash = "\\"
-    
-    def start_app(self):
-        """启动 APP（固定包名，通用启动）"""
-        package = "com.santiaotalk.im"
-        device = self.device
-        print(f"启动应用: {package}")
 
-        # =========================
-        # 1. 强制停止（冷启动）
+    def _remote_join(self, base: str, name: str) -> str:
+        b = base.rstrip("/").replace("\\", "/")
+        return f"{b}/{name}"
+
+    def _adb_pull(self, remote_path: str, local_path: str) -> bool:
+        """使用列表参数执行 pull，避免 Windows 下反斜杠与空格导致失败。"""
+        local_path = os.path.abspath(local_path)
+        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+        remote_path = remote_path.replace("\\", "/")
+        r = subprocess.run(
+            ["adb", "-s", self.device, "pull", remote_path, local_path],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if r.returncode != 0:
+            print_with_color(f"adb pull 失败: {remote_path} -> {local_path}", "red")
+            if r.stderr:
+                print_with_color(r.stderr.strip(), "red")
+            return False
+        if not os.path.isfile(local_path) or os.path.getsize(local_path) == 0:
+            print_with_color(f"pull 后本地文件缺失或为空: {local_path}", "red")
+            return False
+        return True
+
+    def get_foreground_package(self):
+        """当前前台应用包名（无法解析时返回 None）。"""
+        try:
+            r = subprocess.run(
+                ["adb", "-s", self.device, "shell", "dumpsys", "window", "windows"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            for line in r.stdout.splitlines():
+                if "mCurrentFocus" in line:
+                    m = re.search(r"(?:u0|u\d+)\s+([\w\d.]+)/", line)
+                    if m:
+                        return m.group(1)
+                    m = re.search(r"[\s{]([\w\d.]+)/[\w.]+", line)
+                    if m and "." in m.group(1):
+                        return m.group(1)
+            r2 = subprocess.run(
+                ["adb", "-s", self.device, "shell", "dumpsys", "activity", "activities"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            m = re.search(r"mResumedActivity.*? ([\w\d.]+)/", r2.stdout)
+            if m:
+                return m.group(1)
+        except Exception as e:
+            print_with_color(f"get_foreground_package: {e}", "red")
+        return None
+
+    def start_app(self):
+        """冷启动目标应用（包名来自 config.yaml app.package_name）。"""
+        package = self.package_name
+        device = self.device
+        print_with_color(f"启动应用: {package}", "yellow")
+
         subprocess.run(
             ["adb", "-s", device, "shell", "am", "force-stop", package],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stderr=subprocess.DEVNULL,
         )
         time.sleep(1)
 
-        # =========================
-        # 2. monkey 启动
-        result = subprocess.run(
-            ["adb", "-s", device, "shell", "monkey",
-             "-p", package,
-             "-c", "android.intent.category.LAUNCHER",
-             "1"],
+        subprocess.run(
+            [
+                "adb",
+                "-s",
+                device,
+                "shell",
+                "monkey",
+                "-p",
+                package,
+                "-c",
+                "android.intent.category.LAUNCHER",
+                "1",
+            ],
             capture_output=True,
-            text=True
+            text=True,
         )
-    
-        print("等待应用启动...")
+
+        print_with_color("等待应用启动...", "yellow")
         time.sleep(5)
 
 
@@ -133,32 +194,65 @@ class AndroidController:
         return 0, 0
 
     def get_screenshot(self, prefix, save_dir):
-        cap_command = f"adb -s {self.device} shell screencap -p " \
-                      f"{os.path.join(self.screenshot_dir, prefix + '.png').replace(self.backslash, '/')}"
-        pull_command = f"adb -s {self.device} pull " \
-                       f"{os.path.join(self.screenshot_dir, prefix + '.png').replace(self.backslash, '/')} " \
-                       f"{os.path.join(save_dir, prefix + '.png')}"
-        result = execute_adb(cap_command)
-        if result != "ERROR":
-            result = execute_adb(pull_command)
-            if result != "ERROR":
-                return os.path.join(save_dir, prefix + ".png")
-            return result
-        return result
+        os.makedirs(save_dir, exist_ok=True)
+        remote = self._remote_join(self.screenshot_dir, prefix + ".png")
+        local = os.path.abspath(os.path.join(save_dir, prefix + ".png"))
+        cap = subprocess.run(
+            ["adb", "-s", self.device, "shell", "screencap", "-p", remote],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if cap.returncode != 0:
+            print_with_color(f"screencap 失败: {cap.stderr or cap.stdout}", "red")
+            return "ERROR"
+        time.sleep(0.15)
+        if not self._adb_pull(remote, local):
+            return "ERROR"
+        return local
 
     def get_xml(self, prefix, save_dir):
-        dump_command = f"adb -s {self.device} shell uiautomator dump " \
-                       f"{os.path.join(self.xml_dir, prefix + '.xml').replace(self.backslash, '/')}"
-        pull_command = f"adb -s {self.device} pull " \
-                       f"{os.path.join(self.xml_dir, prefix + '.xml').replace(self.backslash, '/')} " \
-                       f"{os.path.join(save_dir, prefix + '.xml')}"
-        result = execute_adb(dump_command)
-        if result != "ERROR":
-            result = execute_adb(pull_command)
-            if result != "ERROR":
-                return os.path.join(save_dir, prefix + ".xml")
-            return result
-        return result
+        """uiautomator dump + pull；失败时回退到默认 /sdcard/window_dump.xml。"""
+        os.makedirs(save_dir, exist_ok=True)
+        local = os.path.abspath(os.path.join(save_dir, prefix + ".xml"))
+        remote_primary = self._remote_join(self.xml_dir, prefix + ".xml")
+
+        subprocess.run(
+            ["adb", "-s", self.device, "shell", "uiautomator", "dump", remote_primary],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        time.sleep(0.2)
+        if self._adb_pull(remote_primary, local):
+            return local
+
+        print_with_color(f"uiautomator dump 首选路径失败，尝试默认 window_dump.xml … ({remote_primary})", "yellow")
+        fallback = "/sdcard/window_dump.xml"
+        subprocess.run(
+            ["adb", "-s", self.device, "shell", "uiautomator", "dump", fallback],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        time.sleep(0.25)
+        if self._adb_pull(fallback, local):
+            return local
+
+        print_with_color("尝试 /data/local/tmp/ui_dump.xml …", "yellow")
+        tmp_remote = "/data/local/tmp/ui_dump.xml"
+        subprocess.run(
+            ["adb", "-s", self.device, "shell", "uiautomator", "dump", tmp_remote],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        time.sleep(0.2)
+        if self._adb_pull(tmp_remote, local):
+            return local
+
+        print_with_color("ERROR: get_xml 全部回退仍失败", "red")
+        return "ERROR"
 
     def back(self):
         adb_command = f"adb -s {self.device} shell input keyevent KEYCODE_BACK"

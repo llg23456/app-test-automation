@@ -239,4 +239,6 @@ Observation: <你看到的界面>
 Thought: <为何选择该操作>
 Action: <唯一一条函数调用或 FINISH>
 Summary: <用一两句话概括，不要包含数字标签>
+
+注意：点击控件时必须写 tap(2) 这种形式，不要写成 tap(element: 2)，否则无法解析。
 """

@@ -98,6 +98,20 @@ class QwenModel(BaseModel):
             return False, response.message
 
 
+def _parse_elem_index_arg(raw: str) -> int:
+    """
+    从 tap/long_press/swipe 括号内与元素编号相关的片段解析出整数。
+    兼容 tap(5)、tap(element: 5)、tap(`element: 5`) 等模型常见写法。
+    """
+    s = raw.strip().strip("`").strip()
+    if re.fullmatch(r"\d+", s):
+        return int(s)
+    nums = re.findall(r"\d+", s)
+    if nums:
+        return int(nums[-1])
+    raise ValueError(f"no element index in {raw!r}")
+
+
 def parse_explore_rsp(rsp):
     try:
         observation = re.findall(r"Observation: (.*?)$", rsp, re.MULTILINE)[0]
@@ -122,20 +136,24 @@ def parse_explore_rsp(rsp):
         # 调试信息
         print_with_color(f"DEBUG: Parsed act_name = '{act_name}'", "blue")
         if act_name == "tap":
-            area = int(re.findall(r"tap\((.*?)\)", act)[0].strip('`'))
+            inner = re.findall(r"tap\((.*?)\)", act)[0]
+            area = _parse_elem_index_arg(inner)
             return [act_name, area, last_act]
         elif act_name == "text":
             input_str = re.findall(r"text\((.*?)\)", act)[0].strip('`')[1:-1]
             return [act_name, input_str, last_act]
         elif act_name == "long_press":
-            area = int(re.findall(r"long_press\((.*?)\)", act)[0].strip('`'))
+            inner = re.findall(r"long_press\((.*?)\)", act)[0]
+            area = _parse_elem_index_arg(inner)
             return [act_name, area, last_act]
         elif act_name == "swipe":
             params = re.findall(r"swipe\((.*?)\)", act)[0].strip('`')
-            area, swipe_dir, dist = params.split(",")
-            area = int(area.strip())
-            swipe_dir = swipe_dir.strip()[1:-1]
-            dist = dist.strip()[1:-1]
+            parts = [p.strip() for p in params.split(",")]
+            if len(parts) < 3:
+                raise ValueError(f"swipe needs 3 args, got {parts!r}")
+            area = _parse_elem_index_arg(parts[0])
+            swipe_dir = parts[1].strip()[1:-1] if parts[1].startswith('"') else parts[1].strip()
+            dist = parts[2].strip()[1:-1] if parts[2].startswith('"') else parts[2].strip()
             return [act_name, area, swipe_dir, dist, last_act]
         elif act_name == "grid":
             return [act_name]
@@ -173,19 +191,19 @@ def parse_grid_rsp(rsp):
         print_with_color(f"DEBUG: Parsed act_name = '{act_name}'", "blue")
         if act_name == "tap":
             params = re.findall(r"tap\((.*?)\)", act)[0].split(",")
-            area = int(params[0].strip())
+            area = _parse_elem_index_arg(params[0])
             subarea = params[1].strip()[1:-1]
             return [act_name + "_grid", area, subarea, last_act]
         elif act_name == "long_press":
             params = re.findall(r"long_press\((.*?)\)", act)[0].split(",")
-            area = int(params[0].strip())
+            area = _parse_elem_index_arg(params[0])
             subarea = params[1].strip()[1:-1]
             return [act_name + "_grid", area, subarea, last_act]
         elif act_name == "swipe":
             params = re.findall(r"swipe\((.*?)\)", act)[0].split(",")
-            start_area = int(params[0].strip())
+            start_area = _parse_elem_index_arg(params[0])
             start_subarea = params[1].strip()[1:-1]
-            end_area = int(params[2].strip())
+            end_area = _parse_elem_index_arg(params[2])
             end_subarea = params[3].strip()[1:-1]
             return [act_name + "_grid", start_area, start_subarea, end_area, end_subarea, last_act]
         elif act_name == "grid":
