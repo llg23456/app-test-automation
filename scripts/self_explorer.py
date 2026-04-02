@@ -10,6 +10,7 @@ import time
 from . import prompts
 from .config import load_config
 from .and_controller import list_all_devices, AndroidController, traverse_tree
+from .exploration_common import scale_ui_coords_to_touch
 from .model import parse_explore_rsp, parse_reflect_rsp, OpenAIModel, QwenModel
 from .utils import print_with_color, draw_bbox_multi
 
@@ -218,12 +219,10 @@ class SelfExplorer:
                     elem_width = br[0] - tl[0]
                     elem_height = br[1] - tl[1]
                     
-                    # 强制应用收藏按钮坐标调整
-                    # 根据用户提供的正确坐标: (493, 580) 对应边界框 ((156, 416), (1280, 898))
                     if "收藏" in step['description']:
-                        # 收藏按钮在菜单中的位置计算
-                        x = tl[0] + int(elem_width * 0.3)  # 左侧30%位置（收藏按钮）
-                        y = tl[1] + int(elem_height * 0.34)  # 上方34%位置（图标中心）
+                        # 参考 (451,713) 相对框 ((117,621),(960,981)) → 偏移 (334,92)，按当前框宽高同比
+                        x = tl[0] + int(elem_width * 334 / 843)
+                        y = tl[1] + int(elem_height * 92 / 360)
                         print_with_color(f"检测到收藏操作，调整坐标到'收藏'位置: ({x}, {y}) 元素边界框: {elem_list[area - 1].bbox}", "yellow")
                     else:
                         # 普通元素按中心
@@ -234,7 +233,9 @@ class SelfExplorer:
                     if "收藏" in step['description'] or "按钮" in step['description']:
                         print_with_color("等待菜单完全弹出...", "yellow")
                         time.sleep(1.5)
-                    
+
+                    dw, dh = int(self.controller.width or 0), int(self.controller.height or 0)
+                    x, y = scale_ui_coords_to_touch(x, y, xml_path, dw, dh)
                     print_with_color(f"点击坐标: ({x}, {y}) 元素边界框: {elem_list[area - 1].bbox}", "blue")
                     ret = self.controller.tap(x, y)
                     if ret == "ERROR":
@@ -271,7 +272,9 @@ class SelfExplorer:
                     
                     # Y 坐标：按在消息气泡的中心位置，避开时间戳
                     y = tl[1] + int(elem_height * 0.5)
-                    
+
+                    dw, dh = int(self.controller.width or 0), int(self.controller.height or 0)
+                    x, y = scale_ui_coords_to_touch(x, y, xml_path, dw, dh)
                     print_with_color(f"长按坐标: ({x}, {y})，原始边界: {elem_list[area - 1].bbox}", "blue")
                     ret = self.controller.long_press(x, y)
                     if ret == "ERROR":
@@ -284,6 +287,8 @@ class SelfExplorer:
                     _, area, swipe_dir, dist = res
                     tl, br = elem_list[area - 1].bbox
                     x, y = (tl[0] + br[0]) // 2, (tl[1] + br[1]) // 2
+                    dw, dh = int(self.controller.width or 0), int(self.controller.height or 0)
+                    x, y = scale_ui_coords_to_touch(x, y, xml_path, dw, dh)
                     ret = self.controller.swipe(x, y, swipe_dir, dist)
                     if ret == "ERROR":
                         print_with_color("ERROR: swipe execution failed", "red")
@@ -489,6 +494,8 @@ class SelfExplorer:
                     _, area = res
                     tl, br = elem_list[area - 1].bbox
                     x, y = (tl[0] + br[0]) // 2, (tl[1] + br[1]) // 2
+                    dw, dh = int(self.controller.width or 0), int(self.controller.height or 0)
+                    x, y = scale_ui_coords_to_touch(x, y, xml_path, dw, dh)
                     ret = self.controller.tap(x, y)
                     if ret == "ERROR":
                         print_with_color("ERROR: tap execution failed", "red")
@@ -503,6 +510,8 @@ class SelfExplorer:
                     _, area = res
                     tl, br = elem_list[area - 1].bbox
                     x, y = (tl[0] + br[0]) // 2, (tl[1] + br[1]) // 2
+                    dw, dh = int(self.controller.width or 0), int(self.controller.height or 0)
+                    x, y = scale_ui_coords_to_touch(x, y, xml_path, dw, dh)
                     ret = self.controller.long_press(x, y)
                     if ret == "ERROR":
                         print_with_color("ERROR: long press execution failed", "red")
@@ -511,6 +520,8 @@ class SelfExplorer:
                     _, area, swipe_dir, dist = res
                     tl, br = elem_list[area - 1].bbox
                     x, y = (tl[0] + br[0]) // 2, (tl[1] + br[1]) // 2
+                    dw, dh = int(self.controller.width or 0), int(self.controller.height or 0)
+                    x, y = scale_ui_coords_to_touch(x, y, xml_path, dw, dh)
                     ret = self.controller.swipe(x, y, swipe_dir, dist)
                     if ret == "ERROR":
                         print_with_color("ERROR: swipe execution failed", "red")

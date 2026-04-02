@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+from typing import List, Optional, Tuple
 import xml.etree.ElementTree as ET
 import time
 
@@ -11,11 +12,33 @@ from .utils import print_with_color
 configs = load_config()
 
 
+def _safe_subprocess_run(
+    cmd: List[str],
+    *,
+    timeout: float,
+    text: bool = True,
+) -> Optional[subprocess.CompletedProcess]:
+    """捕获 TimeoutExpired，避免 BFS 整条链路崩溃；模拟器上 uiautomator dump 易卡死。"""
+    try:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=text,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        short = " ".join(cmd[:5]) + ("…" if len(cmd) > 5 else "")
+        print_with_color(f"子进程超时 ({timeout:.0f}s)，已跳过: {short}", "yellow")
+        return None
+
+
 class AndroidElement:
-    def __init__(self, uid, bbox, attrib):
+    def __init__(self, uid, bbox, attrib, interaction_kind="tap"):
         self.uid = uid
         self.bbox = bbox
         self.attrib = attrib
+        """tap：短按；long_press：长按（来自 long-clickable 节点）。"""
+        self.interaction_kind = interaction_kind
 
 
 def execute_adb(adb_command):
@@ -101,26 +124,79 @@ class AndroidController:
         b = base.rstrip("/").replace("\\", "/")
         return f"{b}/{name}"
 
-    def _adb_pull(self, remote_path: str, local_path: str) -> bool:
+    def _adb_pull(self, remote_path: str, local_path: str, *, quiet: bool = False) -> bool:
         """使用列表参数执行 pull，避免 Windows 下反斜杠与空格导致失败。"""
         local_path = os.path.abspath(local_path)
         os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
         remote_path = remote_path.replace("\\", "/")
-        r = subprocess.run(
+        r = _safe_subprocess_run(
             ["adb", "-s", self.device, "pull", remote_path, local_path],
-            capture_output=True,
+            timeout=90,
             text=True,
-            timeout=120,
         )
+        if r is None:
+            return False
         if r.returncode != 0:
-            print_with_color(f"adb pull 失败: {remote_path} -> {local_path}", "red")
-            if r.stderr:
-                print_with_color(r.stderr.strip(), "red")
+            if not quiet:
+                print_with_color(f"adb pull 失败: {remote_path} -> {local_path}", "red")
+                if r.stderr:
+                    print_with_color(r.stderr.strip(), "red")
             return False
         if not os.path.isfile(local_path) or os.path.getsize(local_path) == 0:
-            print_with_color(f"pull 后本地文件缺失或为空: {local_path}", "red")
+            if not quiet:
+                print_with_color(f"pull 后本地文件缺失或为空: {local_path}", "red")
             return False
         return True
+
+    def _is_valid_ui_xml_bytes(self, data: bytes) -> bool:
+        if not data or len(data) < 60:
+            return False
+        head = data[:12000]
+        return b"<hierarchy" in head or b"<Hierarchy" in head
+
+    def _write_bytes_to_local(self, data: bytes, local_path: str) -> bool:
+        local_path = os.path.abspath(local_path)
+        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+        try:
+            with open(local_path, "wb") as f:
+                f.write(data)
+        except OSError:
+            return False
+        return os.path.isfile(local_path) and os.path.getsize(local_path) > 0
+
+    def _stream_remote_xml_to_local(self, remote_path: str, local_path: str, method: str) -> bool:
+        """用 exec-out 或 shell cat 将远端 XML 流式写入本地（不依赖 adb pull）。"""
+        remote_path = remote_path.replace("\\", "/")
+        if method == "exec-out":
+            cmd = ["adb", "-s", self.device, "exec-out", "cat", remote_path]
+        else:
+            cmd = ["adb", "-s", self.device, "shell", "cat", remote_path]
+        r = _safe_subprocess_run(cmd, timeout=60, text=False)
+        if r is None or r.returncode != 0:
+            return False
+        data = r.stdout
+        if not isinstance(data, bytes):
+            data = bytes(data) if data else b""
+        if not self._is_valid_ui_xml_bytes(data):
+            return False
+        return self._write_bytes_to_local(data, local_path)
+
+    def _try_fetch_remote_xml(self, remote_path: str, local_path: str) -> Tuple[bool, str]:
+        """
+        依次尝试 pull、exec-out cat、shell cat。返回 (成功, 方式名)。
+        pull 在部分 Windows/模拟器上会失败，exec-out 往往更稳。
+        """
+        if self._adb_pull(remote_path, local_path, quiet=True):
+            return True, "pull"
+        if self._stream_remote_xml_to_local(remote_path, local_path, "exec-out"):
+            return True, "exec-out"
+        if self._stream_remote_xml_to_local(remote_path, local_path, "shell"):
+            return True, "shell cat"
+        return False, ""
+
+    def _shell_cat_remote_to_local(self, remote_path: str, local_path: str) -> bool:
+        ok, _ = self._try_fetch_remote_xml(remote_path, local_path)
+        return ok
 
     def get_foreground_package(self):
         """当前前台应用包名（无法解析时返回 None）。"""
@@ -211,47 +287,65 @@ class AndroidController:
             return "ERROR"
         return local
 
+    def _uiautomator_dump_to(self, remote_path: str, timeout: float = 28.0) -> str:
+        """执行 dump；超时或失败不抛异常。remote_path 为空则不带路径参数。"""
+        if remote_path and str(remote_path).strip():
+            remote_path = remote_path.replace("\\", "/")
+            cmd = ["adb", "-s", self.device, "shell", "uiautomator", "dump", remote_path]
+            label = remote_path
+        else:
+            cmd = ["adb", "-s", self.device, "shell", "uiautomator", "dump"]
+            label = "(默认路径)"
+        r = _safe_subprocess_run(cmd, timeout=timeout, text=True)
+        if r is None:
+            return ""
+        err = (r.stderr or "") + (r.stdout or "")
+        if r.returncode != 0:
+            print_with_color(f"uiautomator dump {label}: {err.strip()[:600]}", "yellow")
+        return err
+
     def get_xml(self, prefix, save_dir):
-        """uiautomator dump + pull；失败时回退到默认 /sdcard/window_dump.xml。"""
+        """
+        只向固定远端文件 window_dump.xml 执行 dump，再写入本地 prefix.xml。
+        避免对 nav_end_*.xml 等多路径反复 dump（模拟器上易卡死、且易超时）。
+        """
         os.makedirs(save_dir, exist_ok=True)
         local = os.path.abspath(os.path.join(save_dir, prefix + ".xml"))
-        remote_primary = self._remote_join(self.xml_dir, prefix + ".xml")
+        remote = "/sdcard/window_dump.xml"
 
-        subprocess.run(
-            ["adb", "-s", self.device, "shell", "uiautomator", "dump", remote_primary],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        time.sleep(0.2)
-        if self._adb_pull(remote_primary, local):
-            return local
-
-        print_with_color(f"uiautomator dump 首选路径失败，尝试默认 window_dump.xml … ({remote_primary})", "yellow")
-        fallback = "/sdcard/window_dump.xml"
-        subprocess.run(
-            ["adb", "-s", self.device, "shell", "uiautomator", "dump", fallback],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        time.sleep(0.25)
-        if self._adb_pull(fallback, local):
-            return local
+        for attempt in range(3):
+            self._uiautomator_dump_to(remote, timeout=28.0)
+            time.sleep(0.35 + attempt * 0.15)
+            ok, how = self._try_fetch_remote_xml(remote, local)
+            if ok:
+                if how != "pull":
+                    print_with_color(
+                        f"get_xml `{prefix}.xml`: 已通过 {how} 写入（pull 失败时已回退）",
+                        "yellow",
+                    )
+                return local
+            self._uiautomator_dump_to("", timeout=28.0)
+            time.sleep(0.4)
+            ok, how = self._try_fetch_remote_xml(remote, local)
+            if ok:
+                print_with_color(f"get_xml `{prefix}.xml`: 无参 dump 后已用 {how} 拉取 {remote}", "yellow")
+                return local
+            time.sleep(0.6)
 
         print_with_color("尝试 /data/local/tmp/ui_dump.xml …", "yellow")
         tmp_remote = "/data/local/tmp/ui_dump.xml"
-        subprocess.run(
-            ["adb", "-s", self.device, "shell", "uiautomator", "dump", tmp_remote],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        time.sleep(0.2)
-        if self._adb_pull(tmp_remote, local):
+        self._uiautomator_dump_to(tmp_remote, timeout=28.0)
+        time.sleep(0.4)
+        ok, how = self._try_fetch_remote_xml(tmp_remote, local)
+        if ok:
+            print_with_color(f"get_xml: 已用 {how} 读取 {tmp_remote}", "yellow")
             return local
 
-        print_with_color("ERROR: get_xml 全部回退仍失败", "red")
+        print_with_color(
+            "ERROR: get_xml 多次重试仍失败。可检查模拟器负载、"
+            "或手动执行: adb shell uiautomator dump /sdcard/window_dump.xml",
+            "red",
+        )
         return "ERROR"
 
     def back(self):
